@@ -59,6 +59,7 @@ class PointCloudAttack(object):
         self.attack_method = args.transfer_attack_method if args.query_attack_method is None else args.query_attack_method
 
         self.build_models()
+        print('done')
         self.defense_method = args.defense_method
         if not args.defense_method is None:
             self.pre_head = self.get_defense_head(args.defense_method)
@@ -292,65 +293,153 @@ class PointCloudAttack(object):
             points (torch.cuda.FloatTensor): the point cloud with N points, [1, N, 6].
             target (torch.cuda.LongTensor): the label for points, [1].
         """
-        # normal_vec = points[:,:,-3:].data # N, [1, N, 3]
-        size = points.cpu().numpy().shape[1]
-        print(size)
-        normal_vec = self.get_normal_vector(points[:,:,3:]) # N, [1, N, 3]
-        normal_vec = normal_vec / torch.sqrt(torch.sum(normal_vec ** 2, dim=-1, keepdim=True)) # N, [1, N, 3]
-        # print(abs(normal_vec).max())
-        points = points[:,:,:3].data # P, [1, N, 3]
-        ori_points = points.data
-        clip_func = ClipPointsLinf(budget=self.eps)# * np.sqrt(3*1024))
+        input_dict = {
+            'points': points,
+            'frame_id': 0,
+        }
+        if self.args.surrogate_model != 'centerpoint' :
+            # normal_vec = points[:,:,-3:].data # N, [1, N, 3]
+            size = points.cpu().numpy().shape[1]
+            print(size)
+            normal_vec = self.get_normal_vector(points[:,:,3:]) # N, [1, N, 3]
+            normal_vec = normal_vec / torch.sqrt(torch.sum(normal_vec ** 2, dim=-1, keepdim=True)) # N, [1, N, 3]
+            # print(abs(normal_vec).max())
+            points = points[:,:,:3].data # P, [1, N, 3]
+            ori_points = points.data
+            clip_func = ClipPointsLinf(budget=self.eps)# * np.sqrt(3*1024))
 
-        for i in range(self.max_steps):
-            # P -> P', detach()
-            new_points, spin_axis_matrix, translation_matrix = self.get_transformed_point_cloud(points, normal_vec)
-            new_points = new_points.detach()
-            new_points.requires_grad = True
-            # P' -> P
-            points = self.get_original_point_cloud(new_points, spin_axis_matrix, translation_matrix)
-            points = points.transpose(1, 2) # P, [1, 3, N]
-            # get white-box gradients
-            if not self.defense_method is None:
-                logits = self.wb_classifier(self.pre_head(points))
-            else:
-                logits = self.wb_classifier(points)
-            loss = self.CWLoss(logits, target, kappa=0., tar=False, num_classes=self.num_class)
-            self.wb_classifier.zero_grad()
-            loss.backward()
-            # print(loss.item(), logits.max(1)[1], target)
-            grad = new_points.grad.data # g, [1, N, 3]
-            grad[:,:,2] = 0.
-            # update P', P and N
-            # # Linf
-            # new_points = new_points - self.step_size * torch.sign(grad)
-            # L2
-            norm = torch.sum(grad ** 2, dim=[1, 2]) ** 0.5
-            new_points = new_points - self.step_size * np.sqrt(3*size) * grad / (norm[:, None, None] + 1e-9)
-            points = self.get_original_point_cloud(new_points, spin_axis_matrix, translation_matrix) # P, [1, N, 3]
-            points = clip_func(points, ori_points)
-            # print("2",points.shape)
-            # points = torch.min(torch.max(points, ori_points - self.eps), ori_points + self.eps) # P, [1, N, 3]
-            normal_vec = self.get_normal_vector(points) # N, [1, N, 3]
+            for i in range(self.max_steps):
+                # P -> P', detach()
+                new_points, spin_axis_matrix, translation_matrix = self.get_transformed_point_cloud(points, normal_vec)
+                new_points = new_points.detach()
+                new_points.requires_grad = True
+                # P' -> P
+                points = self.get_original_point_cloud(new_points, spin_axis_matrix, translation_matrix)
+                points = points.transpose(1, 2) # P, [1, 3, N]
+                # get white-box gradients
+                if not self.defense_method is None:
+                    logits = self.wb_classifier(self.pre_head(points))
+                else:
+                    logits = self.wb_classifier(points)
+                loss = self.CWLoss(logits, target, kappa=0., tar=False, num_classes=self.num_class)
+                self.wb_classifier.zero_grad()
+                loss.backward()
+                # print(loss.item(), logits.max(1)[1], target)
+                grad = new_points.grad.data # g, [1, N, 3]
+                grad[:,:,2] = 0.
+                # update P', P and N
+                # # Linf
+                # new_points = new_points - self.step_size * torch.sign(grad)
+                # L2
+                norm = torch.sum(grad ** 2, dim=[1, 2]) ** 0.5
+                new_points = new_points - self.step_size * np.sqrt(3*size) * grad / (norm[:, None, None] + 1e-9)
+                points = self.get_original_point_cloud(new_points, spin_axis_matrix, translation_matrix) # P, [1, N, 3]
+                points = clip_func(points, ori_points)
+                # print("2",points.shape)
+                # points = torch.min(torch.max(points, ori_points - self.eps), ori_points + self.eps) # P, [1, N, 3]
+                normal_vec = self.get_normal_vector(points) # N, [1, N, 3]
 
-        with torch.no_grad():
-            adv_points = points.data
-            if not self.defense_method is None:
-                adv_logits = self.classifier(self.pre_head(points.transpose(1, 2).detach()))
-            else:
-                adv_logits = self.classifier(points.transpose(1, 2).detach())
-            adv_target = adv_logits.data.max(1)[1]
-        # print(target)
-        # print(adv_target)
-        if self.top5_attack:
-            target_top_5 = adv_logits.topk(5)[1]
-            if target in target_top_5:
-                adv_target = target
-            else:
-                adv_target = -1
+            with torch.no_grad():
+                adv_points = points.data
+                if not self.defense_method is None:
+                    adv_logits = self.classifier(self.pre_head(points.transpose(1, 2).detach()))
+                else:
+                    adv_logits = self.classifier(points.transpose(1, 2).detach())
+                adv_target = adv_logits.data.max(1)[1]
+            # print(target)
+            # print(adv_target)
+            if self.top5_attack:
+                target_top_5 = adv_logits.topk(5)[1]
+                if target in target_top_5:
+                    adv_target = target
+                else:
+                    adv_target = -1
 
-        del normal_vec, grad, new_points, spin_axis_matrix, translation_matrix
-        return adv_points, adv_target, (adv_logits.data.max(1)[1] != target).sum().item()
+            del normal_vec, grad, new_points, spin_axis_matrix, translation_matrix
+            return adv_points, adv_target, (adv_logits.data.max(1)[1] != target).sum().item()
+        else:
+
+            if self.args.surrogate_model != 'centerpoint' :
+                # normal_vec = points[:,:,-3:].data # N, [1, N, 3]
+                size = points.cpu().numpy().shape[1]
+                print(size)
+                normal_vec = self.get_normal_vector(points[:,:,3:]) # N, [1, N, 3]
+                normal_vec = normal_vec / torch.sqrt(torch.sum(normal_vec ** 2, dim=-1, keepdim=True)) # N, [1, N, 3]
+                # print(abs(normal_vec).max())
+                points = points[:,:,:3].data # P, [1, N, 3]
+                ori_points = points.data
+                clip_func = ClipPointsLinf(budget=self.eps)# * np.sqrt(3*1024))
+
+                for i in range(self.max_steps):
+                    # P -> P', detach()
+                    new_points, spin_axis_matrix, translation_matrix = self.get_transformed_point_cloud(points, normal_vec)
+                    new_points = new_points.detach()
+                    new_points.requires_grad = True
+                    # P' -> P
+                    points = self.get_original_point_cloud(new_points, spin_axis_matrix, translation_matrix)
+                    # get white-box gradients
+                    input_dict = {
+                    'points': points,
+                    'frame_id': 0,
+                    }
+                    if not self.defense_method is None:
+                        logits = self.wb_classifier(self.pre_head(points))
+                    else:
+                        data_dict = self.demo_dataset.prepare_data(data_dict=input_dict) # 数据预处理
+                        data_dict = self.demo_dataset.collate_batch([data_dict])
+                        load_data_to_gpu(data_dict) # 将数据放到GPU上
+                        pred_dicts, _ = self.model.forward(data_dict) # 模型前向传播
+                        # boxes_lidar = pred_dicts[0]['pred_boxes'].detach().cpu().numpy()
+                        # scores = pred_dicts[0]['pred_scores'].detach().cpu().numpy()
+                        logits = pred_dicts[0]['pred_labels'][0]#.detach().cpu().numpy()
+                        # num_detections = boxes_lidar.shape[0]
+                        # logits = self.wb_classifier(points)
+                    loss = self.CWLoss(logits, target, kappa=0., tar=False, num_classes=self.num_class)
+                    self.model.zero_grad()
+                    loss.backward()
+                    # print(loss.item(), logits.max(1)[1], target)
+                    grad = new_points.grad.data # g, [1, N, 3]
+                    grad[:,:,2] = 0.
+                    # update P', P and N
+                    # # Linf
+                    # new_points = new_points - self.step_size * torch.sign(grad)
+                    # L2
+                    norm = torch.sum(grad ** 2, dim=[1, 2]) ** 0.5
+                    new_points = new_points - self.step_size * np.sqrt(3*size) * grad / (norm[:, None, None] + 1e-9)
+                    points = self.get_original_point_cloud(new_points, spin_axis_matrix, translation_matrix) # P, [1, N, 3]
+                    points = clip_func(points, ori_points)
+                    # print("2",points.shape)
+                    # points = torch.min(torch.max(points, ori_points - self.eps), ori_points + self.eps) # P, [1, N, 3]
+                    normal_vec = self.get_normal_vector(points) # N, [1, N, 3]
+
+                with torch.no_grad():
+                    adv_points = points.data
+                    input_dict = {
+                    'points': adv_points,
+                    'frame_id': 0,
+                    }
+                    if not self.defense_method is None:
+                        adv_logits = self.classifier(self.pre_head(points.transpose(1, 2).detach()))
+                    else:
+                        data_dict = self.demo_dataset.prepare_data(data_dict=input_dict) # 数据预处理
+                        data_dict = self.demo_dataset.collate_batch([data_dict])
+                        load_data_to_gpu(data_dict) # 将数据放到GPU上
+                        pred_dicts, _ = self.model.forward(data_dict) # 模型前向传播
+                        adv_logits = pred_dicts[0]['pred_labels'][0]#.detach().cpu().numpy()
+
+                        # adv_logits = self.classifier(points.transpose(1, 2).detach())
+                    adv_target = adv_logits.data.max(1)[1]
+                # print(target)
+                # print(adv_target)
+                if self.top5_attack:
+                    target_top_5 = adv_logits.topk(5)[1]
+                    if target in target_top_5:
+                        adv_target = target
+                    else:
+                        adv_target = -1
+
+                del normal_vec, grad, new_points, spin_axis_matrix, translation_matrix
+                return adv_points, adv_target, (adv_logits.data.max(1)[1] != target).sum().item()
 
 
     def simba_attack(self, points, target):
