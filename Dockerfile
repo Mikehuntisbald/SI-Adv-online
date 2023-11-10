@@ -84,9 +84,10 @@ RUN echo "source /opt/conda/etc/profile.d/conda.sh" >> /root/.zshrc
 
 WORKDIR /home/catkin_ws/src
 RUN git clone https://github.com/Mikehuntisbald/OpenPCDet
-WORKDIR /home/catkin_ws/src/OpenPCDet
-SHELL ["conda", "run", "-n", "open_pcd", "/bin/zsh", "-c"]
-RUN python setup.py develop
+#WORKDIR /home/catkin_ws/src/OpenPCDet
+#SHELL ["conda", "run", "-n", "open_pcd", "/bin/zsh", "-c"]
+#RUN python setup.py develop
+WORKDIR /home
 
 # 设置入口点
 ENTRYPOINT ["zsh"]
